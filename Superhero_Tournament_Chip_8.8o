@@ -1,0 +1,450 @@
+# =====================================================================
+# Superhero Tournament Compacted (CHIP-8 / Octo Port)
+# Copyright (C) 2026 Daniel (Hanrahan Tools and Games)
+# License: GNU GPL-3.0-or-later
+# Target: 1977 Standard CHIP-8 (64x32 Monochrome Resolution)
+# Memory limit: 4096 Bytes total (Program starts at address 0x200)
+# =====================================================================
+
+# =====================================================================
+# REGISTER ALIASES (16 General-Purpose 8-bit Registers: v0 through vf)
+# =====================================================================
+# v0 and v1 are reserved dynamically for X/Y drawing coordinates in sprite opcodes
+:alias game_state   v2 # Active screen state (0: Notice/Title, 1: Battle, 2: End)
+:alias turn         v3 # Turn indicator (0: Player turn, 1: Enemy turn)
+:alias player_type  v4 # Player hero class (0: Tool, 1: Super, 2: Wizard, 3: Gamer)
+:alias enemy_type   v5 # Enemy hero class  (0: Tool, 1: Super, 2: Wizard, 3: Gamer)
+:alias player_hp    v6 # Current Player Health Points (0 to 100)
+:alias enemy_hp     v7 # Current Enemy Health Points  (0 to 100)
+:alias player_atk   v8 # Player attack damage value
+:alias enemy_atk    v9 # Enemy attack damage value
+:alias message_id   va # Combat status log / result screen identifier
+:alias action_step  vb # Animation frame counter for multi-turn queue
+:alias queue_active vc # Queue flag (0: Idle / accepting input, 1: Processing animation)
+:alias temp_a       vd # General scratchpad register A (inputs, math, offsets)
+:alias temp_b       ve # General scratchpad register B (X-coord backup, loop counters)
+# Note: vf is reserved by CHIP-8 hardware for collision flags & arithmetic carry/borrow bits
+
+# =====================================================================
+# CONSTANTS & MEMORY LOCATIONS
+# =====================================================================
+:const STATE_NOTICE 0  # Title screen mode
+:const STATE_BATTLE 1  # Active gameplay mode
+:const STATE_END    2  # Game over (Win/Loss) screen mode
+
+:const BTN_A 0xA       # Hex Keypad 'A' (Key 10) mapped to Attack / Select
+:const BTN_B 0x0       # Hex Keypad '0' (Key 0)  mapped to Power-Up / Secondary
+
+# Memory buffers reserved for Binary-Coded Decimal (BCD) operations
+# 3 contiguous bytes in RAM required to store hundreds, tens, and ones digits
+: bcd_buffer 0 0 0
+
+# Backup buffer used to preserve low registers (v0-v2) during BCD loads
+: bcd_buffer_save 0 0 0
+
+# =====================================================================
+# MAIN ENTRY POINT & SYSTEM LOOP
+# =====================================================================
+: main
+	# Initialize system into Notice / Title state
+	game_state := STATE_NOTICE
+
+	# Infinite main loop operating state machine
+	loop
+		if game_state == STATE_NOTICE then draw_notice
+		if game_state == STATE_BATTLE then TIC
+		if game_state == STATE_END    then draw_end_screen
+	again
+
+# =====================
+# INITIALIZATION & MATCHUPS
+# =====================
+: initBattle
+	# Select random classes (0-3) using random opcode ANDed with 0x03 mask
+	player_type := random 0x03
+	enemy_type  := random 0x03
+
+	# Reset HP to default starting values
+	player_hp := 100
+	enemy_hp  := 100
+
+	# Base attack power initialization
+	player_atk := 5
+	enemy_atk  := 5
+
+	# Reset turn tracker and queue state
+	turn := 0
+	message_id := 0
+	action_step := 0
+	queue_active := 0
+
+	# Calculate damage advantages based on type matchups
+	applyTypeMatchup
+return
+
+: applyTypeMatchup
+	# Gamer type (3) provides neutral matchup regardless of opponent type
+	if player_type == 3 then jump set_neutral
+	if enemy_type == 3  then jump set_neutral
+
+	# Advantage rule check (Tool > Wizard > Super > Tool)
+	if player_type == 0 then if enemy_type == 2 then jump player_advantage
+	if player_type == 1 then if enemy_type == 0 then jump player_advantage
+	if player_type == 2 then if enemy_type == 1 then jump player_advantage
+
+	# Disadvantage rule check (Enemy advantage)
+	if player_type == 1 then if enemy_type == 2 then jump enemy_advantage
+	if player_type == 0 then if enemy_type == 1 then jump enemy_advantage
+	if player_type == 2 then if enemy_type == 0 then jump enemy_advantage
+
+: set_neutral
+	player_atk := 7
+	enemy_atk  := 7
+	message_id := 1
+return
+
+: player_advantage
+	player_atk := 10
+	message_id := 2
+return
+
+: enemy_advantage
+	enemy_atk := 10
+	message_id := 3
+return
+
+# =====================================================================
+# TURN HANDLERS (PLAYER & ENEMY)
+# =====================================================================
+: playerTurn
+	# Input choice 1: Standard Attack
+	if temp_a == 1 begin
+		action_step := 1
+		queue_active := 1
+		return
+	end
+	# Input choice 2: Power-Up (+5 Attack, passes turn to enemy)
+	if temp_a == 2 begin
+		player_atk += 5
+		message_id := 4
+		turn := 1
+		return
+	end
+return
+
+: enemyTurn
+	# AI logic: Randomly select between Attack (0) or Power-Up (1)
+	temp_a := random 0x01
+	if temp_a == 0 begin
+		action_step := 1
+		queue_active := 1
+	else
+		enemy_atk += 5
+		message_id := 5
+		turn := 0
+	end
+return
+
+# =====================================================================
+# ACTION QUEUE ANIMATION & DAMAGE RESOLUTION
+# =====================================================================
+: processQueue
+	if queue_active == 1 begin
+		# Offset message ID to trigger step-by-step visual frames
+		message_id := 10
+		message_id += action_step
+		draw_battle
+		delay_frames # Throttle execution speed via 60Hz CHIP-8 delay timer
+
+		action_step += 1
+		# Step 4: Complete animation and compute HP reduction
+		if action_step == 4 begin
+			if turn == 0 begin
+				# Prevent register underflow wrap-around (0 - N -> 255)
+				if enemy_hp <= player_atk then enemy_hp := 0
+				if enemy_hp >  player_atk then enemy_hp -= player_atk
+				turn := 1
+			else
+				if player_hp <= enemy_atk then player_hp := 0
+				if player_hp >  enemy_atk then player_hp -= enemy_atk
+				turn := 0
+			end
+			action_step  := 0
+			queue_active := 0
+		end
+	end
+return
+
+# =====================================================================
+# TIC FRAME EXECUTION HANDLER
+# =====================================================================
+: TIC
+	if queue_active == 1 begin
+		processQueue
+	else
+		if turn == 0 begin
+			# Poll Hex keypad hardware for 'A' key (0xA) press
+			temp_a := BTN_A
+			if temp_a key begin
+				temp_a := 1
+				playerTurn
+			end
+			# Poll Hex keypad hardware for '0' key (0x0) press
+			temp_a := BTN_B
+			if temp_a key begin
+				temp_a := 2
+				playerTurn
+			end
+		else
+			enemyTurn
+		end
+	end
+
+	checkBattleEnd
+	draw_battle
+return
+
+# =====================================================================
+# RENDERING & SCREEN ROUTINES
+# =====================================================================
+: draw_battle
+	clear # Clears the 64x32 monochrome display buffer
+
+	# Render Player HP (Top-Left: X=2, Y=2)
+	v0 := 2
+	v1 := 2
+	temp_a := player_hp
+	draw_number
+
+	# Render Player Class Icon (X=2, Y=10)
+	v0 := 2
+	v1 := 10
+	temp_a := player_type
+	draw_type
+
+	# Render Enemy HP (Top-Right: X=42, Y=2)
+	v0 := 42
+	v1 := 2
+	temp_a := enemy_hp
+	draw_number
+
+	# Render Enemy Class Icon (X=42, Y=10)
+	v0 := 42
+	v1 := 10
+	temp_a := enemy_type
+	draw_type
+
+	# Render input prompt indicator if it's the player's turn
+	v0 := 2
+	v1 := 24
+	if turn == 0 begin
+		if queue_active == 0 begin
+			i := sprite_controls
+			sprite v0 v1 6
+		end
+	end
+return
+
+: draw_notice
+	clear
+	# Load memory pointer to Title graphic sprite
+	i := sprite_title
+	v0 := 8
+	v1 := 4
+	sprite v0 v1 15 # Draw 16x15 double-wide title block
+
+	# Load memory pointer to Copyright string graphic
+	i := sprite_copy
+	v0 := 2
+	v1 := 22
+	sprite v0 v1 5
+
+	# Check keys to start game
+	temp_a := BTN_A
+	if temp_a key then start_game
+	temp_a := BTN_B
+	if temp_a key then start_game
+return
+
+: start_game
+	initBattle
+	game_state := STATE_BATTLE
+return
+
+: checkBattleEnd
+	if player_hp == 0 begin
+		message_id := 6 # Loss code
+		game_state := STATE_END
+		return
+	end
+	if enemy_hp == 0 begin
+		message_id := 7 # Win code
+		game_state := STATE_END
+		return
+	end
+return
+
+: draw_end_screen
+	clear
+	v0 := 16
+	v1 := 12
+	# Render WIN or LOSE sprite based on battle outcome
+	if message_id == 7 begin
+		i := sprite_win
+		sprite v0 v1 8
+	else
+		i := sprite_lose
+		sprite v0 v1 8
+	end
+
+	# Restart input handling
+	temp_a := BTN_A
+	if temp_a key then start_game
+	temp_a := BTN_B
+	if temp_a key then start_game
+return
+
+# =====================================================================
+# BCD NUMBER DRAWING ROUTINE (Draws up to 3 digits: Hundreds, Tens, Ones)
+# =====================================================================
+: draw_number
+	ve := v0 # Back up target X coordinate to temp register ve
+	vf := v1 # Back up target Y coordinate to temp register vf
+
+	# Convert 8-bit integer in temp_a to BCD in memory
+	# bcd opcode splits value (e.g. 100) into RAM: [0x1, 0x0, 0x0]
+	i := bcd_buffer
+	bcd temp_a
+
+	# Save low registers v0, v1, and v2 (game_state) to RAM to protect against load overwrite
+	i := bcd_buffer_save
+	save v2
+
+	# 1. Load BCD values from RAM into v0 (Hundreds), v1 (Tens), v2 (Ones)
+	i := bcd_buffer
+	load v2
+
+	# Load built-in 5x5 hex sprite address for Hundreds digit into Index (i)
+	i := hex v0
+	v0 := ve
+	v1 := vf
+	sprite v0 v1 5 # Draw Hundreds digit
+
+	# 2. Advance X coordinate by 5 pixels for Tens digit
+	ve += 5
+	i := bcd_buffer
+	load v2
+	i := hex v1
+	v0 := ve
+	v1 := vf
+	sprite v0 v1 5 # Draw Tens digit
+
+	# 3. Advance X coordinate by 5 pixels for Ones digit
+	ve += 5
+	i := bcd_buffer
+	load v2
+	i := hex v2
+	v0 := ve
+	v1 := vf
+	sprite v0 v1 5 # Draw Ones digit
+
+	# Restore original registers v0, v1, and v2 (game_state) from save buffer
+	i := bcd_buffer_save
+	load v2
+return
+
+# =====================================================================
+# DYNAMIC SPRITE INDEX OFFSET CALCULATOR
+# =====================================================================
+: draw_type
+	# Base address of character type sprite array
+	i := sprite_types
+	# Multiply class ID (temp_a) by 5 bytes per sprite:
+	# temp_a = temp_a * 5 -> (temp_a + temp_a + temp_a + temp_a + temp_a)
+	temp_b := temp_a
+	temp_a += temp_b
+	temp_a += temp_b
+	temp_a += temp_b
+	temp_a += temp_b
+	i += temp_a    # Offset index register by calculated byte stride
+	sprite v0 v1 5 # XOR draw 5-byte tall sprite
+return
+
+# =====================================================================
+# TIMING & DELAY ROUTINES
+# =====================================================================
+: delay_frames
+	# Set CHIP-8 60Hz hardware delay timer
+	temp_b := 30
+	delay := temp_b
+	# Busy-wait loop until hardware countdown reaches zero
+	loop
+		temp_b := delay
+		if temp_b == 0 then return
+	again
+return
+
+# =====================================================================
+# GRAPHICS BITMAPS (16-bit wide and 8-bit wide binary sprites)
+# =====================================================================
+: sprite_title
+	0b11111111 0b11111111
+	0b10000000 0b00000001
+	0b10110111 0b01110101
+	0b10100101 0b01010101
+	0b10110111 0b01110101
+	0b10010101 0b01010101
+	0b10110111 0b01110101
+	0b10000000 0b00000001
+	0b11111111 0b11111111
+
+: sprite_copy
+	0b11111111
+	0b10011001
+	0b10011001
+	0b11111111
+
+: sprite_controls
+	0b11100000
+	0b10100000
+	0b11100000
+
+: sprite_win
+	0b01000100
+	0b01010100
+	0b00101000
+	0b00000000
+	0b11101110
+
+: sprite_lose
+	0b10000000
+	0b10000000
+	0b11100000
+	0b00000000
+	0b11101110
+
+: sprite_types
+	# CLASS 0: TOOL
+	0b11100000
+	0b01000000
+	0b01000000
+	0b01000000
+	0b00000000
+	# CLASS 1: SUPER
+	0b01110000
+	0b10000000
+	0b01100000
+	0b00010000
+	0b11100000
+	# CLASS 2: WIZARD
+	0b10001000
+	0b10001000
+	0b10101000
+	0b01010000
+	0b00000000
+	# CLASS 3: GAMER
+	0b01110000
+	0b10000000
+	0b10110000
+	0b10010000
+	0b01110000
