@@ -8,7 +8,7 @@ The game is written in octo.
 You need to run .ch8 file in Chip 8 Emulator/Interpreter
 
 
-<h3>Both of these links take you to Superhero_Tournament Video Game adaptation</h3>
+<h3>Both of these links take you to Superhero_Tournament</h3>
 
 <a href="https://github.com/Daniel-Hanrahan-Tools-and-Games/Superhero_Tournament">Superhero_Tournament Repository Page</a>
 
